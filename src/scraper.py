@@ -196,27 +196,56 @@ class GoogleMapsScraper:
                     continue
                 
                 # Extract business name
-                name_element = self.page.query_selector('h1')
-                name_text = name_element.inner_text() if name_element else "N/A"
+                # name_element = self.page.query_selector('h1')
+                # name_text = name_element.inner_text() if name_element else "N/A"
+
+                # Extract business name using the specific class you mentioned
+                # Extract business name
+                name_element = self.page.query_selector('h1.DUwDvf')
+                name_text = "N/A"
+                if name_element:
+                    # Get the direct text content of the h1, ignoring the span children
+                    name_text = name_element.inner_text()
+                    
+                    # Additional cleaning to remove any extra spans that might be included
+                    name_text = re.sub(r'\s{2,}', ' ', name_text).strip()
+
                 
                 # Extract category - update selector to match new structure
-                category_element = self.page.query_selector('button[jsaction="pane.rating.category"]')
+                # Extract category using the updated selector
+                category_element = self.page.query_selector('button[jsaction="pane.wfvdle17.category"], button[jsaction*="category"]')
                 category = category_element.inner_text() if category_element else "N/A"
-                
                 # Extract rating using the aria-label approach from Selenium code
-                rating_element = self.page.query_selector('span[aria-label*="stars"]')
+                # rating_element = self.page.query_selector('span[aria-label*="stars"]')
+                # rating = "N/A"
+                # if rating_element:
+                #     rating_text = rating_element.get_attribute('aria-label')
+                #     rating_match = re.search(r'(\d+\.\d+)', rating_text)
+                #     if rating_match:
+                #         rating = rating_match.group(1)
+
+                # Extract rating with enhanced selector including role="img"
+                rating_element = self.page.query_selector('span[aria-label*="stars"][role="img"], span[aria-label*="stars"]')
                 rating = "N/A"
                 if rating_element:
                     rating_text = rating_element.get_attribute('aria-label')
-                    rating_match = re.search(r'(\d+\.\d+)', rating_text)
-                    if rating_match:
-                        rating = rating_match.group(1)
+                    if rating_text:
+                        rating_match = re.search(r'(\d+\.\d+)', rating_text)
+                        if rating_match:
+                            rating = rating_match.group(1)
                 
-                # Extract reviews count
-                reviews_element = self.page.query_selector('button[jsaction="pane.rating.moreReviews"]')
+               # Extract reviews count - updated selector for the reviews button
+                reviews_element = self.page.query_selector('button[jsaction="pane.wfvdle13.reviewChart.moreReviews"], button[jsaction*="moreReviews"]')
                 reviews = "N/A"
                 if reviews_element:
-                    reviews_text = reviews_element.inner_text()
+                    # Find the span inside the button that contains the reviews text
+                    span_element = reviews_element.query_selector('span')
+                    if span_element:
+                        reviews_text = span_element.inner_text()
+                    else:
+                        reviews_text = reviews_element.inner_text()
+                    
+                    # Extract just the numbers
                     reviews_match = re.search(r'(\d+(?:,\d+)*)', reviews_text)
                     if reviews_match:
                         reviews = reviews_match.group(1).replace(',', '')
