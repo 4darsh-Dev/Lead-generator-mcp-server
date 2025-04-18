@@ -1,4 +1,3 @@
-
 """
 Google Maps Business Scraper
 ----------------------------
@@ -22,7 +21,6 @@ import phonenumbers
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, Page, Browser
-# from transformers import pipeline
 from tqdm import tqdm
 
 # Configure logging
@@ -51,6 +49,7 @@ class GoogleMapsScraper:
         self.browser = None
         self.page = None
         self.data = []
+        self.playwright = None
         
         # Load NLP classifier for lead scoring
         try:
@@ -62,9 +61,9 @@ class GoogleMapsScraper:
 
     def start_browser(self) -> None:
         """Initialize and start the Playwright browser."""
-        playwright = sync_playwright().start()
+        self.playwright = sync_playwright().start()
         
-        self.browser = playwright.chromium.launch(
+        self.browser = self.playwright.chromium.launch(
             headless=self.headless,
             slow_mo=self.slow_mo
         )
@@ -84,31 +83,35 @@ class GoogleMapsScraper:
         """Close the browser and clean up resources."""
         if self.browser:
             self.browser.close()
+        if self.playwright:
+            self.playwright.stop()
 
-    def search_query(self, query: str) -> None:
+    def search_query(self, query: str) -> bool:
         """Navigate to Google Maps and enter the search query."""
         encoded_query = query.replace(' ', '+')
-        url = f"https://www.google.com/maps/search/{encoded_query}"
+        url = f"https://www.google.co.in/maps/search/{encoded_query}"
         
         logger.info(f"Searching for: {query}")
         self.page.goto(url)
         
-        # Wait for search results to load
+        # Store the last query for potential use later
+        self.last_query = query
+        
+        # Wait for search results to load - using the hfpxzc class that's used in the working Selenium code
         try:
-            self.page.wait_for_selector('[role="feed"]', timeout=20000)
+            self.page.wait_for_selector('a.hfpxzc', timeout=20000)
             logger.info("Search results loaded successfully")
+            return True
         except Exception as e:
             logger.error(f"Error loading search results: {e}")
             return False
-        
-        return True
 
     def scroll_results(self, max_results: int = 100) -> int:
         """Scroll through results to load more businesses."""
         logger.info(f"Scrolling to load up to {max_results} results")
         
-        # Find the results container
-        results_selector = '[role="feed"]'
+        # Find the results container - adjusted to match Google Maps current structure
+        results_selector = 'div[role="feed"]'
         
         # Check if results exist
         if not self.page.query_selector(results_selector):
@@ -125,8 +128,8 @@ class GoogleMapsScraper:
         
         with tqdm(total=max_results, desc="Loading results") as pbar:
             while attempt < max_attempts:
-                # Get current results count
-                results = self.page.query_selector_all('div[role="article"]')
+                # Get current results count - using the hfpxzc class as in Selenium code
+                results = self.page.query_selector_all('a.hfpxzc')
                 current_count = len(results)
                 
                 # Update progress bar
@@ -163,61 +166,85 @@ class GoogleMapsScraper:
         """Extract data from business listings."""
         logger.info("Extracting business data...")
         
-        # Get all business listings
-        business_cards = self.page.query_selector_all('div[role="article"]')
+        # Get all business listings using the correct selector
+        business_links = self.page.query_selector_all('a.hfpxzc')
         results = []
         
         # Limit to max_results
-        business_cards = business_cards[:max_results]
+        business_links = business_links[:max_results]
         
-        for i, card in enumerate(tqdm(business_cards, desc="Extracting data")):
+        for i, link in enumerate(tqdm(business_links, desc="Extracting data")):
             try:
-                # Extract basic info without clicking (faster and less detectable)
-                name = card.query_selector('div[role="heading"]')
-                name_text = name.inner_text() if name else "N/A"
+                # Scroll the element into view to make sure it's clickable
+                self.page.evaluate('(element) => element.scrollIntoView({ behavior: "smooth", block: "center" })', link)
+                time.sleep(random.uniform(0.5, 1.0))  # Brief pause for scrolling
                 
-                # Get category, rating, reviews
-                info_elements = card.query_selector_all('div[class*="fontBodyMedium"]')
+                # Click on the listing to get detailed information
+                link.click()
                 
-                # Usually first element is category, second contains rating/reviews
-                category = info_elements[0].inner_text() if len(info_elements) > 0 else "N/A"
-                rating_reviews = info_elements[1].inner_text() if len(info_elements) > 1 else "N/A"
+                # Wait for the details panel to load with phone button
+                try:
+                    self.page.wait_for_selector('button[aria-label^="Phone:"]', timeout=10000)
+                    # Give it a moment to fully load
+                    time.sleep(random.uniform(1.0, 2.0))
+                except Exception as e:
+                    logger.warning(f"Timeout waiting for phone button on business {i+1}: {e}")
+                    # Try to go back and continue
+                    self.page.go_back()
+                    self.page.wait_for_selector('a.hfpxzc', timeout=10000)
+                    time.sleep(random.uniform(1.0, 2.0))
+                    continue
                 
-                # Extract rating and review count with regex
+                # Extract business name
+                name_element = self.page.query_selector('h1')
+                name_text = name_element.inner_text() if name_element else "N/A"
+                
+                # Extract category - update selector to match new structure
+                category_element = self.page.query_selector('button[jsaction="pane.rating.category"]')
+                category = category_element.inner_text() if category_element else "N/A"
+                
+                # Extract rating using the aria-label approach from Selenium code
+                rating_element = self.page.query_selector('span[aria-label*="stars"]')
                 rating = "N/A"
+                if rating_element:
+                    rating_text = rating_element.get_attribute('aria-label')
+                    rating_match = re.search(r'(\d+\.\d+)', rating_text)
+                    if rating_match:
+                        rating = rating_match.group(1)
+                
+                # Extract reviews count
+                reviews_element = self.page.query_selector('button[jsaction="pane.rating.moreReviews"]')
                 reviews = "N/A"
-                rating_match = re.search(r'(\d+\.\d+)', rating_reviews)
-                if rating_match:
-                    rating = rating_match.group(1)
+                if reviews_element:
+                    reviews_text = reviews_element.inner_text()
+                    reviews_match = re.search(r'(\d+(?:,\d+)*)', reviews_text)
+                    if reviews_match:
+                        reviews = reviews_match.group(1).replace(',', '')
                 
-                reviews_match = re.search(r'(\d+) reviews', rating_reviews)
-                if reviews_match:
-                    reviews = reviews_match.group(1)
+                # Extract address using aria-label like in the Selenium code
+                address_element = self.page.query_selector('button[aria-label^="Address:"]')
+                address = "N/A"
+                if address_element:
+                    address = address_element.get_attribute('aria-label').replace('Address: ', '')
                 
-                # Click on the listing to get more details
-                name.click()
+                # Extract phone using aria-label like in the Selenium code
+                phone_element = self.page.query_selector('button[aria-label^="Phone:"]')
+                phone = "N/A"
+                if phone_element:
+                    phone = phone_element.get_attribute('aria-label').replace('Phone: ', '')
                 
-                # Wait for details page to load
-                self.page.wait_for_selector('button[data-item-id="phone"]', timeout=5000, state="attached")
-                
-                # Give it a moment to fully load
-                time.sleep(random.uniform(0.5, 1.5))
-                
-                # Extract address, phone, website
-                address_el = self.page.query_selector('button[data-item-id="address"]')
-                address = address_el.inner_text() if address_el else "N/A"
-                
-                phone_el = self.page.query_selector('button[data-item-id="phone"]')
-                phone = phone_el.inner_text() if phone_el else "N/A"
-                
-                website_el = self.page.query_selector('a[data-item-id="authority"]')
-                website = website_el.get_attribute('href') if website_el else "N/A"
-                
-                # Sometimes the website URL contains a Google redirect, extract the actual URL
-                if website != "N/A" and "google.com/url" in website:
-                    website_match = re.search(r'q=([^&]+)', website)
-                    if website_match:
-                        website = requests.utils.unquote(website_match.group(1))
+                # Extract website using aria-label like in the Selenium code
+                website_element = self.page.query_selector('a[aria-label^="Website:"]')
+                website = "N/A"
+                if website_element:
+                    website = website_element.get_attribute('aria-label').replace('Website: ', '')
+                    # Also get the href attribute
+                    href = website_element.get_attribute('href')
+                    if href and "google.com/url" in href:
+                        # Extract the real URL from Google's redirect
+                        website_match = re.search(r'q=([^&]+)', href)
+                        if website_match:
+                            website = requests.utils.unquote(website_match.group(1))
                 
                 # Add to results
                 business_data = {
@@ -232,21 +259,26 @@ class GoogleMapsScraper:
                 
                 results.append(business_data)
                 
-                # Go back to results list
-                self.page.go_back()
-                self.page.wait_for_selector('div[role="article"]', timeout=5000)
+                # Go back to results list - using JS history for better reliability
+                self.page.evaluate('window.history.back()')
+                
+                # Wait for results page to reload
+                self.page.wait_for_selector('a.hfpxzc', timeout=10000)
                 
                 # Add random delay between 1-3 seconds
-                time.sleep(random.uniform(1, 3))
+                time.sleep(random.uniform(1.0, 3.0))
                 
             except Exception as e:
                 logger.warning(f"Error extracting data from business {i+1}: {e}")
-                # Return to results page if we're stuck
+                # Try to return to results page if we're stuck
                 try:
                     self.page.go_back()
-                    self.page.wait_for_selector('div[role="article"]', timeout=5000)
+                    self.page.wait_for_selector('a.hfpxzc', timeout=10000)
+                    time.sleep(random.uniform(1.0, 2.0))
                 except:
                     logger.error("Failed to return to results page")
+                    # If we can't recover, try searching again
+                    self.search_query(self.last_query)
         
         return results
 
@@ -267,10 +299,13 @@ class GoogleMapsScraper:
                         business['phone'] = phonenumbers.format_number(
                             parsed_number, phonenumbers.PhoneNumberFormat.INTERNATIONAL
                         )
+                        business['phone_valid'] = True
                     else:
                         business['phone_valid'] = False
                 except:
                     business['phone_valid'] = False
+            else:
+                business['phone_valid'] = False
             
             # Validate websites
             if business['website'] != "N/A":
@@ -380,6 +415,7 @@ class GoogleMapsScraper:
             # Search for the query
             search_success = self.search_query(query)
             if not search_success:
+                logger.error("Search failed. Exiting.")
                 return None
             
             # Load results by scrolling
