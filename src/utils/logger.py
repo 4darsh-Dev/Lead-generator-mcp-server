@@ -5,14 +5,16 @@ Provides consistent logging across all modules.
 
 import logging
 import sys
+from typing import Optional
 
 
-def get_logger(name: str) -> logging.Logger:
+def get_logger(name: str, level: str = 'INFO') -> logging.Logger:
     """
     Get a configured logger instance.
     
     Args:
         name: Name of the logger (typically __name__)
+        level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
         
     Returns:
         logging.Logger: Configured logger instance
@@ -27,7 +29,9 @@ def get_logger(name: str) -> logging.Logger:
         )
         handler.setFormatter(formatter)
         logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
+        
+        numeric_level = getattr(logging, level.upper(), logging.INFO)
+        logger.setLevel(numeric_level)
     
     return logger
 

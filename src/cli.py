@@ -1,13 +1,12 @@
 """
-Command-line interface for the scraper.
-Handles argument parsing and user interaction.
+Command-line interface for the Google Maps scraper.
 """
 
 import argparse
 import sys
 
-from .scraper_core import create_scraper
-from .logger import configure_logging, get_logger
+from core.scraper import GoogleMapsScraper
+from utils.logger import configure_logging, get_logger
 
 logger = get_logger(__name__)
 
@@ -119,12 +118,12 @@ def run_cli() -> int:
     logger.info(f"Mode: {'Visible' if args.visible else 'Headless'}")
     
     try:
-        scraper = create_scraper(
+        scraper = GoogleMapsScraper(
             headless=not args.visible,
             slow_mo=args.slow_mo
         )
         
-        output_file = scraper.scrape(
+        output_file = scraper.scrape_and_export(
             query=args.query,
             max_results=args.max_results,
             output_file=args.output

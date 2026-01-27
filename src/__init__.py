@@ -1,29 +1,30 @@
 """
-Lead Generator MCP Server Package.
-Scrapes business data from Google Maps for lead generation.
+Google Maps Lead Generator
+A modular web scraper for extracting business leads from Google Maps.
 """
 
-from .scraper_core import GoogleMapsScraper, create_scraper
-from .browser import BrowserManager
-from .extractor import DataExtractor, BusinessDataCollector
-from .validator import DataValidator, PhoneValidator, WebsiteValidator, LeadScorer
-from .exporter import DataExporter, CSVExporter
-from .logger import get_logger, configure_logging
-
 __version__ = '1.0.0'
+__author__ = 'ADARSH MAURYA'
+
+from .core.scraper import GoogleMapsScraper
+from .models.business import Business
+from .services import (
+    BrowserManager,
+    DataExtractor,
+    ValidationService,
+    LeadScoringService,
+    ExportService
+)
+from .utils.logger import get_logger, configure_logging
 
 __all__ = [
     'GoogleMapsScraper',
-    'create_scraper',
+    'Business',
     'BrowserManager',
     'DataExtractor',
-    'BusinessDataCollector',
-    'DataValidator',
-    'PhoneValidator',
-    'WebsiteValidator',
-    'LeadScorer',
-    'DataExporter',
-    'CSVExporter',
+    'ValidationService',
+    'LeadScoringService',
+    'ExportService',
     'get_logger',
     'configure_logging',
 ]

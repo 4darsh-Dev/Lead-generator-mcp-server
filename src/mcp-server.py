@@ -5,8 +5,8 @@ Exposes scraping functionality through MCP interface.
 
 from mcp.server.fastmcp import FastMCP
 
-from scraper_core import create_scraper
-from logger import get_logger
+from core.scraper import GoogleMapsScraper
+from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -28,23 +28,12 @@ def scrape_google_maps(query: str, max_results: int = 100) -> list:
     logger.info(f"MCP tool called: query='{query}', max_results={max_results}")
     
     try:
-        scraper = create_scraper(headless=True)
+        scraper = GoogleMapsScraper(headless=True)
         
-        scraper.browser_manager.start()
-        
-        if not scraper.browser_manager.navigate_to_search(query):
-            logger.error("Search navigation failed")
-            return []
-        
-        scraper.browser_manager.scroll_results_container(max_results)
-        
-        from extractor import BusinessDataCollector
-        collector = BusinessDataCollector(scraper.browser_manager)
-        raw_data = collector.collect_from_listings(max_results)
-        
-        validated_data = scraper.validator.validate_batch(raw_data)
-        
-        scraper.browser_manager.close()
+        validated_data = scraper.scrape(
+            query=query,
+            max_results=max_results
+        )
         
         logger.info(f"Successfully scraped {len(validated_data)} businesses")
         return validated_data
