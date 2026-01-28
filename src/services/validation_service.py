@@ -9,8 +9,8 @@ import phonenumbers
 import requests
 from tqdm import tqdm
 
-from utils.constants import VALIDATION_CONFIG, USER_AGENTS
-from utils.helpers import extract_digits, normalize_url
+from src.utils.constants import VALIDATION_CONFIG, USER_AGENTS
+from src.utils.helpers import extract_digits, normalize_url
 
 
 class ValidationService:

@@ -4,7 +4,7 @@ Lead scoring service to rank business quality.
 
 from typing import Dict
 
-from utils.constants import LEAD_SCORING
+from src.utils.constants import LEAD_SCORING
 
 
 class LeadScoringService:

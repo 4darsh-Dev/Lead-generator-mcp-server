@@ -5,8 +5,8 @@ Command-line interface for the Google Maps scraper.
 import argparse
 import sys
 
-from core.scraper import GoogleMapsScraper
-from utils.logger import configure_logging, get_logger
+from src.core.scraper import GoogleMapsScraper
+from src.utils.logger import configure_logging, get_logger
 
 logger = get_logger(__name__)
 

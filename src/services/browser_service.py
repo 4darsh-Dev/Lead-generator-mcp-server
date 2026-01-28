@@ -9,7 +9,7 @@ from typing import Optional
 from playwright.sync_api import sync_playwright, Page, Browser, Playwright
 from tqdm import tqdm
 
-from utils.constants import (
+from src.utils.constants import (
     USER_AGENTS, 
     GOOGLE_MAPS_BASE_URL, 
     SELECTORS, 
@@ -17,7 +17,7 @@ from utils.constants import (
     HTTP_HEADERS,
     SCROLL_CONFIG
 )
-from utils.helpers import add_random_delay, encode_search_query
+from src.utils.helpers import add_random_delay, encode_search_query
 
 
 class BrowserManager:
