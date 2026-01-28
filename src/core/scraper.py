@@ -4,12 +4,12 @@ Main scraper orchestrator that coordinates all services.
 
 from typing import Optional, List, Dict
 
-from services.browser_service import BrowserManager
-from services.extraction_service import DataExtractor
-from services.validation_service import ValidationService
-from services.scoring_service import LeadScoringService
-from services.export_service import ExportService
-from utils.logger import get_logger
+from src.services.browser_service import BrowserManager
+from src.services.extraction_service import DataExtractor
+from src.services.validation_service import ValidationService
+from src.services.scoring_service import LeadScoringService
+from src.services.export_service import ExportService
+from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

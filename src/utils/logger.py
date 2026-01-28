@@ -1,6 +1,9 @@
 """
 Logging configuration module.
 Provides consistent logging across all modules.
+
+IMPORTANT: For MCP STDIO servers, logs MUST go to stderr, not stdout!
+Writing to stdout corrupts JSON-RPC messages.
 """
 
 import logging
@@ -12,6 +15,9 @@ def get_logger(name: str, level: str = 'INFO') -> logging.Logger:
     """
     Get a configured logger instance.
     
+    CRITICAL: Uses stderr for MCP STDIO compatibility.
+    Never use stdout in MCP servers as it corrupts JSON-RPC messages.
+    
     Args:
         name: Name of the logger (typically __name__)
         level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
@@ -22,7 +28,8 @@ def get_logger(name: str, level: str = 'INFO') -> logging.Logger:
     logger = logging.getLogger(name)
     
     if not logger.handlers:
-        handler = logging.StreamHandler(sys.stdout)
+        # CRITICAL: Use stderr, not stdout for MCP STDIO compatibility
+        handler = logging.StreamHandler(sys.stderr)
         formatter = logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
