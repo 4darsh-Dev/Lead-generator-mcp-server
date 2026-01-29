@@ -5,7 +5,7 @@ Main scraper orchestrator that coordinates all services.
 from typing import Optional, List, Dict
 
 from src.services.browser_service import BrowserManager
-from src.services.extraction_service import DataExtractor
+from src.services.extraction_service_v3 import DataExtractorV3
 from src.services.validation_service import ValidationService
 from src.services.scoring_service import LeadScoringService
 from src.services.export_service import ExportService
@@ -26,7 +26,7 @@ class GoogleMapsScraper:
             slow_mo: Slow down operations by specified milliseconds
         """
         self.browser_manager = BrowserManager(headless, slow_mo)
-        self.data_extractor = DataExtractor(self.browser_manager)
+        self.data_extractor = DataExtractorV3(self.browser_manager)
         self.validator = ValidationService()
         self.scorer = LeadScoringService()
         self.exporter = ExportService()
@@ -47,6 +47,7 @@ class GoogleMapsScraper:
             list: List of validated and scored business dictionaries
         """
         logger.info(f"Starting scrape for query: {query}")
+        results = []
         
         try:
             self.browser_manager.start()
@@ -62,20 +63,27 @@ class GoogleMapsScraper:
                 logger.warning("No results found")
                 return []
             
-            raw_data = self.data_extractor.extract_from_listings(max_results)
-            logger.info(f"Extracted data from {len(raw_data)} businesses")
+            # Collect data with callback
+            def collect_business(business_data: Dict):
+                # Validate
+                validated = self.validator.validate_business(business_data)
+                # Score
+                scored = self.scorer.calculate_score(validated)
+                validated['lead_score'] = scored
+                # Add to results
+                results.append(validated)
             
-            validated_data = self.validator.validate_batch(raw_data)
-            logger.info("Data validation complete")
+            self.data_extractor.extract_from_listings_incremental(
+                max_results, 
+                callback=collect_business
+            )
             
-            scored_data = self.scorer.score_batch(validated_data)
-            logger.info("Lead scoring complete")
-            
-            return scored_data
+            logger.info(f"Extracted and processed {len(results)} businesses")
+            return results
             
         except Exception as e:
             logger.error(f"Error during scraping: {e}", exc_info=True)
-            return []
+            return results  # Return partial results if any
         finally:
             self.browser_manager.close()
     
@@ -87,7 +95,8 @@ class GoogleMapsScraper:
         export_format: str = 'csv'
     ) -> Optional[str]:
         """
-        Scrape data and export to file.
+        Scrape data and export to file with incremental saving.
+        Each business is saved immediately after extraction and validation.
         
         Args:
             query: Search query for Google Maps
@@ -98,21 +107,72 @@ class GoogleMapsScraper:
         Returns:
             str: Path to exported file, or None if failed
         """
-        data = self.scrape(query, max_results)
+        if export_format.lower() == 'json':
+            # JSON doesn't support incremental writing well, fall back to batch mode
+            data = self.scrape(query, max_results)
+            if not data:
+                logger.error("No data to export")
+                return None
+            try:
+                output_path = self.exporter.export_to_json(data, output_file)
+                logger.info(f"Data exported to {output_path}")
+                return output_path
+            except Exception as e:
+                logger.error(f"Export failed: {e}", exc_info=True)
+                return None
         
-        if not data:
-            logger.error("No data to export")
-            return None
+        # CSV incremental mode
+        logger.info(f"Starting scrape for query: {query}")
+        extracted_count = 0
         
         try:
-            if export_format.lower() == 'json':
-                output_path = self.exporter.export_to_json(data, output_file)
-            else:
-                output_path = self.exporter.export_to_csv(data, output_file)
+            # Initialize incremental CSV
+            output_path = self.exporter.init_incremental_csv(output_file)
+            logger.info(f"Saving results incrementally to: {output_path}")
             
-            logger.info(f"Data exported to {output_path}")
+            self.browser_manager.start()
+            
+            if not self.browser_manager.navigate_to_search(query):
+                logger.error("Failed to navigate to search results")
+                self.exporter.close_csv()
+                return None
+            
+            result_count = self.browser_manager.scroll_results_container(max_results)
+            logger.info(f"Loaded {result_count} business listings")
+            
+            if result_count == 0:
+                logger.warning("No results found")
+                self.exporter.close_csv()
+                return None
+            
+            # Extract with callback for incremental saving
+            def save_business(business_data: Dict):
+                nonlocal extracted_count
+                # Validate
+                validated = self.validator.validate_business(business_data)
+                # Score
+                scored = self.scorer.calculate_score(validated)
+                validated['lead_score'] = scored
+                # Save immediately
+                self.exporter.append_to_csv(validated)
+                extracted_count += 1
+                logger.info(f"Saved business {extracted_count}: {validated.get('name', 'Unknown')}")
+            
+            self.data_extractor.extract_from_listings_incremental(
+                max_results, 
+                callback=save_business
+            )
+            
+            logger.info(f"Extraction complete. Total businesses saved: {extracted_count}")
+            
             return output_path
             
         except Exception as e:
-            logger.error(f"Export failed: {e}", exc_info=True)
+            logger.error(f"Error during scraping: {e}", exc_info=True)
+            if extracted_count > 0:
+                logger.info(f"Partial data saved: {extracted_count} businesses before error")
+                return output_path
             return None
+        finally:
+            self.exporter.close_csv()
+            self.browser_manager.close()

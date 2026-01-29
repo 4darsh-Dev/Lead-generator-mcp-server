@@ -61,27 +61,45 @@ class BrowserManager:
         if self.playwright:
             self.playwright.stop()
     
-    def navigate_to_search(self, query: str) -> bool:
+    def navigate_to_search(self, query: str, max_retries: int = 3) -> bool:
         """
-        Navigate to Google Maps and enter the search query.
+        Navigate to Google Maps and enter the search query with retry logic.
         
         Args:
             query: Search query string
+            max_retries: Maximum number of retry attempts
             
         Returns:
             bool: True if navigation successful, False otherwise
         """
+        from src.utils.logger import get_logger
+        logger = get_logger(__name__)
+        
         encoded_query = encode_search_query(query)
         url = f"{GOOGLE_MAPS_BASE_URL}{encoded_query}"
         
-        self.page.goto(url)
-        self.last_query = query
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Navigating to Google Maps (attempt {attempt + 1}/{max_retries})")
+                self.page.goto(url, timeout=60000, wait_until='domcontentloaded')
+                self.last_query = query
+                
+                # Wait for business links to appear
+                self.page.wait_for_selector(SELECTORS['business_link'], timeout=30000)
+                logger.info("Successfully navigated to search results")
+                return True
+                
+            except Exception as e:
+                logger.warning(f"Navigation attempt {attempt + 1} failed: {e}")
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 5  # Increasing wait time
+                    logger.info(f"Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"Failed to navigate after {max_retries} attempts")
+                    return False
         
-        try:
-            self.page.wait_for_selector(SELECTORS['business_link'], timeout=20000)
-            return True
-        except Exception:
-            return False
+        return False
     
     def scroll_results_container(self, max_results: int = 100) -> int:
         """
