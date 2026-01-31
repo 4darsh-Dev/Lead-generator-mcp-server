@@ -103,7 +103,7 @@ class BrowserManager:
     
     def scroll_results_container(self, max_results: int = 100) -> int:
         """
-        Scroll through results to load more businesses.
+        Scroll through results to load more businesses with improved strategy.
         
         Args:
             max_results: Maximum number of results to load
@@ -111,31 +111,56 @@ class BrowserManager:
         Returns:
             int: Number of results loaded
         """
+        from src.utils.logger import get_logger
+        logger = get_logger(__name__)
+        
         results_selector = SELECTORS['results_feed']
         
         if not self.page.query_selector(results_selector):
             return 0
         
         previous_count = 0
-        attempt = 0
+        consecutive_same_count = 0
+        scroll_iteration = 0
         
         with tqdm(total=max_results, desc="Loading results") as pbar:
-            while attempt < SCROLL_CONFIG['max_attempts']:
+            while scroll_iteration < SCROLL_CONFIG['max_attempts']:
                 results = self.page.query_selector_all(SELECTORS['business_link'])
                 current_count = len(results)
                 
+                # Update progress bar
                 if current_count > previous_count:
                     pbar.update(current_count - previous_count)
+                    logger.debug(f"Loaded {current_count} results so far")
                     previous_count = current_count
+                    consecutive_same_count = 0
+                else:
+                    consecutive_same_count += 1
                 
+                # Stop if we've reached target or no more results loading
                 if current_count >= max_results:
+                    logger.info(f"Reached target of {max_results} results")
                     break
                 
-                self.page.evaluate(f'''
-                    document.querySelector('{results_selector}').scrollTop = 
-                    document.querySelector('{results_selector}').scrollHeight
-                ''')
+                if consecutive_same_count >= SCROLL_CONFIG['consecutive_same_count_limit']:
+                    logger.info(f"No new results after {consecutive_same_count} attempts. Stopping at {current_count} results.")
+                    break
                 
+                # Scroll to bottom with multiple scroll actions for better loading
+                try:
+                    # Multiple small scrolls can trigger better loading
+                    for _ in range(3):
+                        self.page.evaluate(f'''
+                            const container = document.querySelector('{results_selector}');
+                            if (container) {{
+                                container.scrollTop = container.scrollHeight;
+                            }}
+                        ''')
+                        time.sleep(0.3)
+                except Exception as e:
+                    logger.debug(f"Scroll error: {e}")
+                
+                # Wait for new results to load
                 time.sleep(
                     SCROLL_CONFIG['pause_time'] + 
                     random.uniform(
@@ -144,10 +169,7 @@ class BrowserManager:
                     )
                 )
                 
-                if current_count == previous_count:
-                    attempt += 1
-                else:
-                    attempt = 0
+                scroll_iteration += 1
         
         return previous_count
     

@@ -9,6 +9,7 @@ from src.services.extraction_service_v3 import DataExtractorV3
 from src.services.validation_service import ValidationService
 from src.services.scoring_service import LeadScoringService
 from src.services.export_service import ExportService
+from src.services.state_service import get_state_manager, ScrapingState
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -92,10 +93,11 @@ class GoogleMapsScraper:
         query: str,
         max_results: int = 100,
         output_file: Optional[str] = None,
-        export_format: str = 'csv'
+        export_format: str = 'csv',
+        resume: bool = True
     ) -> Optional[str]:
         """
-        Scrape data and export to file with incremental saving.
+        Scrape data and export to file with incremental saving and resume support.
         Each business is saved immediately after extraction and validation.
         
         Args:
@@ -103,6 +105,7 @@ class GoogleMapsScraper:
             max_results: Maximum number of results to scrape
             output_file: Output filename (auto-generated if None)
             export_format: Export format ('csv' or 'json')
+            resume: Enable resume functionality (default: True)
             
         Returns:
             str: Path to exported file, or None if failed
@@ -121,14 +124,35 @@ class GoogleMapsScraper:
                 logger.error(f"Export failed: {e}", exc_info=True)
                 return None
         
-        # CSV incremental mode
-        logger.info(f"Starting scrape for query: {query}")
-        extracted_count = 0
+        # CSV incremental mode with state management
+        state_manager = get_state_manager()
+        state: Optional[ScrapingState] = None
         
         try:
-            # Initialize incremental CSV
-            output_path = self.exporter.init_incremental_csv(output_file)
-            logger.info(f"Saving results incrementally to: {output_path}")
+            # Check for existing state if resume is enabled
+            if resume:
+                state = state_manager.load_state(query, max_results)
+            
+            resuming = state is not None
+            
+            if resuming:
+                logger.info(f"🔄 Resuming previous session")
+                logger.info(f"   Already processed: {len(state.processed_indices)}/{len(state.business_urls)}")
+                logger.info(f"   Output file: {state.output_file}")
+                output_file = state.output_file
+            else:
+                logger.info(f"🆕 Starting new scraping session for: {query}")
+            
+            # Initialize or resume CSV
+            if resuming:
+                output_path = self.exporter.init_incremental_csv(output_file, resume=True)
+                # Load existing business names to avoid duplicates
+                existing_names = self.exporter.load_existing_business_names(output_file)
+            else:
+                output_path = self.exporter.init_incremental_csv(output_file, resume=False)
+                existing_names = set()
+            
+            logger.info(f"Output file: {output_path}")
             
             self.browser_manager.start()
             
@@ -137,40 +161,104 @@ class GoogleMapsScraper:
                 self.exporter.close_csv()
                 return None
             
-            result_count = self.browser_manager.scroll_results_container(max_results)
-            logger.info(f"Loaded {result_count} business listings")
+            # Collect business URLs if this is a new session
+            if not resuming:
+                result_count = self.browser_manager.scroll_results_container(max_results)
+                logger.info(f"Loaded {result_count} business listings")
+                
+                if result_count == 0:
+                    logger.warning("No results found")
+                    self.exporter.close_csv()
+                    return None
+                
+                # Collect URLs and create state
+                business_urls = self.data_extractor._collect_business_urls(max_results)
+                state = state_manager.create_new_state(
+                    query=query,
+                    max_results=max_results,
+                    output_file=output_path,
+                    business_urls=business_urls
+                )
+                
+                # Store URLs in extractor
+                self.data_extractor.business_urls = business_urls
+            else:
+                # Restore URLs to extractor
+                self.data_extractor.business_urls = state.business_urls
+                logger.info(f"Restored {len(state.business_urls)} business URLs from state")
             
-            if result_count == 0:
-                logger.warning("No results found")
-                self.exporter.close_csv()
-                return None
+            extracted_count = 0
             
-            # Extract with callback for incremental saving
-            def save_business(business_data: Dict):
+            # Extract with callback for incremental saving and state updates
+            def save_and_track_business(business_data: Optional[Dict], index: int):
                 nonlocal extracted_count
+                
+                if business_data is None:
+                    # Failed extraction
+                    state.mark_failed(index)
+                    state_manager.update_state(state)
+                    return
+                
+                # Check for duplicates
+                business_name = business_data.get('name', '').strip().lower()
+                if business_name in existing_names:
+                    logger.debug(f"Skipping duplicate: {business_data.get('name', 'Unknown')}")
+                    state.mark_processed(index)
+                    state_manager.update_state(state)
+                    return
+                
                 # Validate
                 validated = self.validator.validate_business(business_data)
                 # Score
                 scored = self.scorer.calculate_score(validated)
                 validated['lead_score'] = scored
+                
                 # Save immediately
                 self.exporter.append_to_csv(validated)
                 extracted_count += 1
-                logger.info(f"Saved business {extracted_count}: {validated.get('name', 'Unknown')}")
+                
+                # Update state
+                state.mark_processed(index)
+                state_manager.update_state(state)
+                
+                # Add to existing names
+                if business_name:
+                    existing_names.add(business_name)
+                
+                logger.info(
+                    f"Saved business {len(state.processed_indices)}/{len(state.business_urls)}: "
+                    f"{validated.get('name', 'Unknown')}"
+                )
             
+            # Extract with resume support
             self.data_extractor.extract_from_listings_incremental(
-                max_results, 
-                callback=save_business
+                max_results=max_results,
+                callback=save_and_track_business,
+                processed_indices=state.processed_indices if resuming else None
             )
             
-            logger.info(f"Extraction complete. Total businesses saved: {extracted_count}")
+            logger.info(f"Extraction complete. Total businesses saved in this session: {extracted_count}")
+            logger.info(f"Total businesses in file: {len(state.processed_indices)}")
+            
+            # Mark state as completed
+            state_manager.mark_completed(state)
             
             return output_path
             
+        except KeyboardInterrupt:
+            logger.warning("⚠️  Scraping interrupted by user")
+            if state:
+                logger.info(f"✅ Progress saved! Run the same command to resume.")
+                logger.info(f"   Processed: {len(state.processed_indices)}/{len(state.business_urls)}")
+                state_manager.save_state(state)
+            raise
+            
         except Exception as e:
             logger.error(f"Error during scraping: {e}", exc_info=True)
-            if extracted_count > 0:
+            if state and extracted_count > 0:
                 logger.info(f"Partial data saved: {extracted_count} businesses before error")
+                logger.info(f"Run the same command to resume from where it stopped.")
+                state_manager.save_state(state)
                 return output_path
             return None
         finally:

@@ -10,7 +10,7 @@ from .core.scraper import GoogleMapsScraper
 from .models.business import Business
 from .services import (
     BrowserManager,
-    DataExtractor,
+    DataExtractorV3,
     ValidationService,
     LeadScoringService,
     ExportService

@@ -6,7 +6,7 @@ Hybrid approach combining URL-based navigation with data attributes.
 import re
 import time
 import random
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Callable
 from urllib.parse import urlparse, parse_qs
 
 import requests
@@ -185,13 +185,21 @@ class DataExtractorV3:
         
         return urls
     
-    def extract_from_listings_incremental(self, max_results: int = 100, callback=None) -> int:
+    def extract_from_listings_incremental(
+        self,
+        max_results: int = 100,
+        callback: Optional[Callable[[Dict, int], None]] = None,
+        start_index: int = 0,
+        processed_indices: Optional[set] = None
+    ) -> int:
         """
-        Extract data using URL-based navigation (most reliable method).
+        Extract data using URL-based navigation with resume support.
         
         Args:
             max_results: Maximum number of businesses to extract
-            callback: Function to call with each extracted business (receives Dict)
+            callback: Function to call with each extracted business (receives Dict and index)
+            start_index: Index to start extraction from (for resume)
+            processed_indices: Set of already processed indices (for resume)
             
         Returns:
             int: Number of successfully extracted businesses
@@ -200,9 +208,10 @@ class DataExtractorV3:
         self.search_url = self.page.url
         logger.info(f"Search URL: {self.search_url}")
         
-        # Collect all business URLs upfront
-        logger.info("Collecting business URLs from search results...")
-        self.business_urls = self._collect_business_urls(max_results)
+        # Collect all business URLs upfront if not already collected
+        if not self.business_urls:
+            logger.info("Collecting business URLs from search results...")
+            self.business_urls = self._collect_business_urls(max_results)
         
         if not self.business_urls:
             logger.error("No business URLs collected")
@@ -213,9 +222,23 @@ class DataExtractorV3:
         consecutive_failures = 0
         max_consecutive_failures = 5
         
-        logger.info(f"Starting extraction of {len(self.business_urls)} businesses")
+        # Initialize processed indices set if not provided
+        if processed_indices is None:
+            processed_indices = set()
         
-        for i, business_url in enumerate(tqdm(self.business_urls, desc="Extracting & saving")):
+        # Calculate URLs to process
+        urls_to_process = [
+            (i, url) for i, url in enumerate(self.business_urls)
+            if i not in processed_indices
+        ]
+        
+        logger.info(
+            f"Starting extraction: {len(urls_to_process)} pending, "
+            f"{len(processed_indices)} already processed, "
+            f"{len(self.business_urls)} total"
+        )
+        
+        for i, business_url in tqdm(urls_to_process, desc="Extracting & saving"):
             try:
                 # Navigate directly to business URL
                 logger.debug(f"[{i+1}/{len(self.business_urls)}] Navigating to: {business_url}")
@@ -233,6 +256,14 @@ class DataExtractorV3:
                     logger.debug(f"Timeout waiting for details on listing {i+1}: {wait_error}")
                     consecutive_failures += 1
                     failed_count += 1
+                    
+                    # Call callback with failure info
+                    if callback:
+                        try:
+                            callback(None, i)
+                        except Exception as callback_error:
+                            logger.error(f"Callback error for failed listing {i+1}: {callback_error}")
+                    
                     continue
                 
                 # Extract business data
@@ -242,16 +273,23 @@ class DataExtractorV3:
                     consecutive_failures = 0  # Reset on success
                     logger.debug(f"[{i+1}/{len(self.business_urls)}] Extracted: {business_data.get('name', 'Unknown')}")
                     
-                    # Call callback immediately
+                    # Call callback immediately with data and index
                     if callback:
                         try:
-                            callback(business_data)
+                            callback(business_data, i)
                         except Exception as callback_error:
                             logger.error(f"Callback error for business {i+1}: {callback_error}")
                 else:
                     logger.warning(f"Failed to extract data for listing {i+1}")
                     failed_count += 1
                     consecutive_failures += 1
+                    
+                    # Call callback with failure info
+                    if callback:
+                        try:
+                            callback(None, i)
+                        except Exception as callback_error:
+                            logger.error(f"Callback error for failed listing {i+1}: {callback_error}")
                 
                 # Check if too many consecutive failures
                 if consecutive_failures >= max_consecutive_failures:
@@ -268,6 +306,13 @@ class DataExtractorV3:
                 logger.error(f"Error extracting listing {i+1}: {e}")
                 consecutive_failures += 1
                 failed_count += 1
+                
+                # Call callback with failure info
+                if callback:
+                    try:
+                        callback(None, i)
+                    except Exception as callback_error:
+                        logger.error(f"Callback error for exception at {i+1}: {callback_error}")
                 
                 if consecutive_failures >= max_consecutive_failures:
                     logger.error(f"Too many consecutive failures ({consecutive_failures}). Stopping extraction.")

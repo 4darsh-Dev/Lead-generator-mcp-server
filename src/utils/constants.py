@@ -31,10 +31,11 @@ HTTP_HEADERS = {
 }
 
 SCROLL_CONFIG = {
-    'max_attempts': 20,
-    'pause_time': 1.5,
-    'random_delay_min': 0.5,
-    'random_delay_max': 1.5
+    'max_attempts': 50,  # Increased for loading more results
+    'pause_time': 2.0,  # Increased pause to let results load
+    'random_delay_min': 0.8,
+    'random_delay_max': 2.0,
+    'consecutive_same_count_limit': 8  # Stop if count doesn't change after 8 attempts
 }
 
 EXTRACTION_CONFIG = {
