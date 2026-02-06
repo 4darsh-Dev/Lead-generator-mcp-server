@@ -161,7 +161,7 @@ class GoogleMapsScraper:
                 self.exporter.close_csv()
                 return None
             
-            # Collect business URLs if this is a new session
+            # Collect business URLs if this is a new session OR if we need more URLs
             if not resuming:
                 result_count = self.browser_manager.scroll_results_container(max_results)
                 logger.info(f"Loaded {result_count} business listings")
@@ -183,9 +183,31 @@ class GoogleMapsScraper:
                 # Store URLs in extractor
                 self.data_extractor.business_urls = business_urls
             else:
-                # Restore URLs to extractor
-                self.data_extractor.business_urls = state.business_urls
-                logger.info(f"Restored {len(state.business_urls)} business URLs from state")
+                # Check if we need to fetch more URLs to reach max_results
+                existing_url_count = len(state.business_urls)
+                
+                if existing_url_count < max_results:
+                    logger.info(f"⚠️  State has only {existing_url_count} URLs but {max_results} requested")
+                    logger.info(f"   Fetching additional URLs to reach target...")
+                    
+                    # Scroll to get more results
+                    result_count = self.browser_manager.scroll_results_container(max_results)
+                    logger.info(f"Loaded {result_count} business listings")
+                    
+                    # Collect all URLs from page
+                    all_business_urls = self.data_extractor._collect_business_urls(max_results)
+                    
+                    # Update state with new URLs
+                    state.business_urls = all_business_urls
+                    state.max_results = max_results
+                    state_manager.save_state(state)
+                    
+                    logger.info(f"✓ Updated state: {existing_url_count} → {len(all_business_urls)} URLs")
+                    self.data_extractor.business_urls = all_business_urls
+                else:
+                    # Restore URLs to extractor
+                    self.data_extractor.business_urls = state.business_urls
+                    logger.info(f"Restored {len(state.business_urls)} business URLs from state")
             
             extracted_count = 0
             

@@ -4,7 +4,6 @@ Handles checkpoint creation, state persistence, and recovery.
 """
 
 import json
-import os
 import hashlib
 from dataclasses import dataclass, asdict, field
 from datetime import datetime
@@ -181,10 +180,15 @@ class StateManager:
             
             state = ScrapingState.from_dict(data)
             
-            # Validate state
+            # Check if state is completed but has fewer URLs than requested
             if state.completed:
-                logger.info(f"Previous scraping session was completed. Starting fresh.")
-                return None
+                if len(state.business_urls) < max_results:
+                    logger.info(f"Previous session completed with {len(state.business_urls)} URLs, but {max_results} requested")
+                    logger.info(f"Marking state as incomplete to fetch more results")
+                    state.completed = False  # Allow resuming to fetch more
+                else:
+                    logger.info(f"Previous scraping session was completed with {len(state.business_urls)} URLs. Starting fresh.")
+                    return None
             
             logger.info(f"Found existing state: {len(state.processed_indices)}/{len(state.business_urls)} processed")
             return state

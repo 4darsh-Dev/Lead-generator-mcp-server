@@ -67,3 +67,5 @@ htmlcov/
 # Project specific
 business_leads_*.csv
 leads_*.csv
+
+*.backup

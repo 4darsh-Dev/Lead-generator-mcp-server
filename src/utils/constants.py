@@ -48,7 +48,7 @@ EXTRACTION_CONFIG = {
 }
 
 VALIDATION_CONFIG = {
-    'website_timeout': 5,
+    'website_timeout': 8,  # Increased from 5 to handle slow websites
     'default_country_code': 'US'
 }
 

@@ -4,6 +4,7 @@ Data validation service for business information.
 
 import random
 from typing import Dict, List
+import urllib3
 
 import phonenumbers
 import requests
@@ -11,6 +12,9 @@ from tqdm import tqdm
 
 from src.utils.constants import VALIDATION_CONFIG, USER_AGENTS
 from src.utils.helpers import extract_digits, normalize_url
+
+# Suppress only the single InsecureRequestWarning from urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 class ValidationService:
@@ -57,22 +61,69 @@ class ValidationService:
         Returns:
             bool: True if website is accessible, False otherwise
         """
-        if url == "N/A":
+        if url == "N/A" or not url.strip():
             return False
         
         normalized_url = normalize_url(url)
         
+        # Try HEAD request first (faster)
         try:
-            headers = {'User-Agent': random.choice(USER_AGENTS)}
+            headers = {
+                'User-Agent': random.choice(USER_AGENTS),
+                'Accept': '*/*',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive'
+            }
             response = requests.head(
                 normalized_url,
                 timeout=VALIDATION_CONFIG['website_timeout'],
                 headers=headers,
-                allow_redirects=True
+                allow_redirects=True,
+                verify=True  # Verify SSL certificates
             )
-            return response.status_code < 400
+            
+            # Success codes: 200-399 (including redirects)
+            if response.status_code < 400:
+                return True
+            
+            # If HEAD returns 405 (Method Not Allowed) or 404, try GET
+            if response.status_code in [404, 405, 501]:
+                raise requests.exceptions.RequestException("HEAD not supported, trying GET")
+                
         except Exception:
-            return False
+            # Fallback to GET request if HEAD fails
+            try:
+                response = requests.get(
+                    normalized_url,
+                    timeout=VALIDATION_CONFIG['website_timeout'] + 5,  # Extra time for GET
+                    headers=headers,
+                    allow_redirects=True,
+                    verify=True,
+                    stream=True  # Don't download full content
+                )
+                
+                # Close connection immediately after getting headers
+                response.close()
+                
+                return response.status_code < 400
+                
+            except Exception:
+                # Last resort: try without SSL verification (some sites have cert issues)
+                try:
+                    response = requests.get(
+                        normalized_url,
+                        timeout=VALIDATION_CONFIG['website_timeout'] + 5,
+                        headers=headers,
+                        allow_redirects=True,
+                        verify=False,  # Ignore SSL errors
+                        stream=True
+                    )
+                    response.close()
+                    return response.status_code < 400
+                except Exception:
+                    return False
+        
+        return False
     
     def validate_business(self, business_data: Dict) -> Dict:
         """
