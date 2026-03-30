@@ -39,6 +39,7 @@ def get_logger(name: str, level: str = 'INFO') -> logging.Logger:
         
         numeric_level = getattr(logging, level.upper(), logging.INFO)
         logger.setLevel(numeric_level)
+        logger.propagate = False
     
     return logger
 

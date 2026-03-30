@@ -3,10 +3,13 @@ Command-line interface for the Google Maps scraper.
 """
 
 import argparse
+import asyncio
 import sys
 
 from src.core.scraper import GoogleMapsScraper
 from src.services.state_service import get_state_manager
+from src.startup_india.constants import DEFAULT_SEARCH_URL
+from src.startup_india.scraper import StartupIndiaScraper
 from src.utils.logger import configure_logging, get_logger
 
 logger = get_logger(__name__)
@@ -82,6 +85,40 @@ Examples:
         action='store_true',
         help='Show active scraping sessions and exit'
     )
+
+    parser.add_argument(
+        '--startup-india',
+        action='store_true',
+        help='Run Startup India scaling startup scraper workflow'
+    )
+
+    parser.add_argument(
+        '--search-url',
+        type=str,
+        default=DEFAULT_SEARCH_URL,
+        help='Startup India search URL (roles=Startup and stages=scaling are enforced)'
+    )
+
+    parser.add_argument(
+        '--concurrency',
+        type=int,
+        default=5,
+        help='Concurrent profile extraction tasks for Startup India mode (default: 5)'
+    )
+
+    parser.add_argument(
+        '--checkpoint-interval',
+        type=int,
+        default=20,
+        help='Save state every N processed profiles in Startup India mode (default: 20)'
+    )
+
+    parser.add_argument(
+        '--max-retries',
+        type=int,
+        default=3,
+        help='Max retries per Startup India profile page (default: 3)'
+    )
     
     return parser.parse_args()
 
@@ -100,19 +137,31 @@ def validate_arguments(args: argparse.Namespace) -> bool:
     if args.show_sessions:
         return True
     
-    if not args.query:
+    if not args.startup_india and not args.query:
         logger.error("--query is required for scraping")
         return False
     
     if args.max_results < 1:
         logger.error("max-results must be at least 1")
         return False
+
+    if args.concurrency < 1:
+        logger.error("concurrency must be at least 1")
+        return False
+
+    if args.checkpoint_interval < 1:
+        logger.error("checkpoint-interval must be at least 1")
+        return False
+
+    if args.max_retries < 1:
+        logger.error("max-retries must be at least 1")
+        return False
         
     if args.slow_mo < 0:
         logger.error("slow-mo must be non-negative")
         return False
         
-    if not args.query.strip():
+    if not args.startup_india and not args.query.strip():
         logger.error("query cannot be empty")
         return False
         
@@ -137,24 +186,49 @@ def run_cli() -> int:
     if not validate_arguments(args):
         return 1
     
-    logger.info("Starting Google Maps Lead Generator")
-    logger.info(f"Query: {args.query}")
-    logger.info(f"Max results: {args.max_results}")
-    logger.info(f"Mode: {'Visible' if args.visible else 'Headless'}")
-    logger.info(f"Resume: {'Disabled' if args.no_resume else 'Enabled'}")
+    if args.startup_india:
+        logger.info("Starting Startup India Lead Generator")
+        logger.info(f"Search URL: {args.search_url}")
+        logger.info(f"Max profiles: {args.max_results}")
+        logger.info(f"Concurrency: {args.concurrency}")
+        logger.info(f"Mode: {'Visible' if args.visible else 'Headless'}")
+        logger.info(f"Resume: {'Disabled' if args.no_resume else 'Enabled'}")
+    else:
+        logger.info("Starting Google Maps Lead Generator")
+        logger.info(f"Query: {args.query}")
+        logger.info(f"Max results: {args.max_results}")
+        logger.info(f"Mode: {'Visible' if args.visible else 'Headless'}")
+        logger.info(f"Resume: {'Disabled' if args.no_resume else 'Enabled'}")
     
     try:
-        scraper = GoogleMapsScraper(
-            headless=not args.visible,
-            slow_mo=args.slow_mo
-        )
-        
-        output_file = scraper.scrape_and_export(
-            query=args.query,
-            max_results=args.max_results,
-            output_file=args.output,
-            resume=not args.no_resume
-        )
+        if args.startup_india:
+            scraper = StartupIndiaScraper(
+                headless=not args.visible,
+                slow_mo=args.slow_mo,
+                concurrency=args.concurrency,
+                checkpoint_interval=args.checkpoint_interval,
+                max_retries=args.max_retries,
+            )
+            output_file = asyncio.run(
+                scraper.run(
+                    search_url=args.search_url,
+                    output_file=args.output,
+                    resume=not args.no_resume,
+                    max_profiles=args.max_results,
+                )
+            )
+        else:
+            scraper = GoogleMapsScraper(
+                headless=not args.visible,
+                slow_mo=args.slow_mo
+            )
+
+            output_file = scraper.scrape_and_export(
+                query=args.query,
+                max_results=args.max_results,
+                output_file=args.output,
+                resume=not args.no_resume
+            )
         
         if output_file:
             print(f"\n✅ Success! Data saved to: {output_file}")
