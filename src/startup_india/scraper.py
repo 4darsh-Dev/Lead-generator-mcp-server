@@ -2,7 +2,9 @@
 
 import asyncio
 from datetime import datetime
+import re
 from typing import Dict, Optional
+from tqdm import tqdm
 
 from src.startup_india.browser import StartupIndiaBrowser
 from src.startup_india.constants import (
@@ -72,25 +74,119 @@ class StartupIndiaScraper:
                     len(state.processed_profile_urls),
                     len(state.discovered_profile_urls),
                 )
-                output_file = state.output_file
+                if not output_file:
+                    output_file = state.output_file
 
             resolved_output = self._resolve_output_filename(output_file, state)
             state.output_file = resolved_output
 
+            if (
+                not state.completed_listing_discovery
+                and not state.discovered_profile_urls
+                and state.listing_details
+            ):
+                recovered_urls = list(state.listing_details.keys())
+                state.discovered_profile_urls = recovered_urls
+                state.completed_listing_discovery = True
+                self.state_manager.save_state(state)
+                logger.info(
+                    "Recovered %d discovered profile urls from saved state; proceeding to extraction",
+                    len(recovered_urls),
+                )
+
             self.csv_store.open(filename=resolved_output, resume=resuming)
+
+            live_extraction_tasks: list[asyncio.Task] = []
+            live_extraction_enabled = False
 
             if not state.completed_listing_discovery:
                 logger.info("Starting listing discovery")
-                listing_details = await self.browser.discover_listing_items(
-                    search_url=normalized_url,
-                    existing_details=state.listing_details,
-                    max_profiles=max_profiles,
+                live_extraction_enabled = True
+                live_semaphore = asyncio.Semaphore(self.concurrency)
+                scheduled_profile_urls: set[str] = set()
+                processed_since_checkpoint = 0
+
+                extraction_total = max_profiles if max_profiles > 0 else None
+                extraction_bar = tqdm(
+                    total=extraction_total,
+                    desc="Extracting profiles",
+                    unit="profile",
+                    dynamic_ncols=True,
                 )
+
+                def on_extraction_task_done(task: asyncio.Task) -> None:
+                    nonlocal processed_since_checkpoint
+                    extraction_bar.update(1)
+                    processed_since_checkpoint += 1
+                    if processed_since_checkpoint >= self.checkpoint_interval:
+                        processed_since_checkpoint = 0
+                        self.state_manager.save_state(state)
+
+                    if task.cancelled():
+                        return
+                    exc = task.exception()
+                    if exc:
+                        logger.debug("Live extraction task failed: %s", exc)
+
+                async def on_new_listing_items(items) -> None:
+                    for item in items:
+                        profile_url = item.profile_url
+                        if profile_url in scheduled_profile_urls:
+                            continue
+
+                        if profile_url not in state.discovered_profile_urls:
+                            state.discovered_profile_urls.append(profile_url)
+
+                        scheduled_profile_urls.add(profile_url)
+                        task = asyncio.create_task(
+                            self._process_profile_url(
+                                profile_url=profile_url,
+                                state=state,
+                                semaphore=live_semaphore,
+                            )
+                        )
+                        task.add_done_callback(on_extraction_task_done)
+                        live_extraction_tasks.append(task)
+
+                discovery_total = max_profiles if max_profiles > 0 else None
+                discovery_bar = tqdm(
+                    total=discovery_total,
+                    desc="Discovering listings",
+                    unit="profile",
+                    dynamic_ncols=True,
+                )
+
+                last_discovery_count = 0
+
+                def on_discovery_progress(current_count: int) -> None:
+                    nonlocal last_discovery_count
+                    delta = max(0, current_count - last_discovery_count)
+                    if delta:
+                        discovery_bar.update(delta)
+                    last_discovery_count = current_count
+
+                try:
+                    listing_details = await self.browser.discover_listing_items(
+                        search_url=normalized_url,
+                        existing_details=state.listing_details,
+                        max_profiles=max_profiles,
+                        on_discovery_progress=on_discovery_progress,
+                        on_new_listing_items=on_new_listing_items,
+                    )
+                finally:
+                    discovery_bar.close()
+
                 state.listing_details = listing_details
                 state.discovered_profile_urls = list(listing_details.keys())
                 state.completed_listing_discovery = True
                 self.state_manager.save_state(state)
                 logger.info("Discovery complete: %d profile urls", len(state.discovered_profile_urls))
+
+                try:
+                    if live_extraction_tasks:
+                        await asyncio.gather(*live_extraction_tasks, return_exceptions=True)
+                finally:
+                    extraction_bar.close()
             else:
                 logger.info(
                     "Using discovered URLs from state: %d",
@@ -106,6 +202,9 @@ class StartupIndiaScraper:
                 self.state_manager.mark_completed(state)
                 return resolved_output
 
+            if live_extraction_enabled:
+                logger.info("Pending profiles after live extraction: %d", len(pending_urls))
+
             semaphore = asyncio.Semaphore(self.concurrency)
 
             tasks = [
@@ -114,12 +213,23 @@ class StartupIndiaScraper:
             ]
 
             processed_since_checkpoint = 0
-            for task in asyncio.as_completed(tasks):
-                await task
-                processed_since_checkpoint += 1
-                if processed_since_checkpoint >= self.checkpoint_interval:
-                    processed_since_checkpoint = 0
-                    self.state_manager.save_state(state)
+            extraction_bar = tqdm(
+                total=len(pending_urls),
+                desc="Extracting profiles",
+                unit="profile",
+                dynamic_ncols=True,
+            )
+
+            try:
+                for task in asyncio.as_completed(tasks):
+                    await task
+                    extraction_bar.update(1)
+                    processed_since_checkpoint += 1
+                    if processed_since_checkpoint >= self.checkpoint_interval:
+                        processed_since_checkpoint = 0
+                        self.state_manager.save_state(state)
+            finally:
+                extraction_bar.close()
 
             self.state_manager.mark_completed(state)
             logger.info(
@@ -184,6 +294,11 @@ class StartupIndiaScraper:
                 await asyncio.sleep(min(1.5 * attempts, 5))
 
         state.failed_count += 1
+        logger.warning(
+            "Profile failed after %d attempts: %s",
+            self.max_retries,
+            profile_url,
+        )
 
     async def _extract_profile(self, profile_url: str, state: StartupIndiaState) -> Dict[str, str]:
         listing_data = state.listing_details.get(profile_url, {})
@@ -191,15 +306,69 @@ class StartupIndiaScraper:
 
         try:
             await page.goto(profile_url, wait_until="domcontentloaded", timeout=PROFILE_PAGE_TIMEOUT_MS)
+            await self._wait_for_profile_render(page)
 
             name = await self._read_text(page, PROFILE_NAME_SELECTOR, listing_data.get("name", ""))
-            phone = await self._read_text(page, PROFILE_PHONE_SELECTOR, "")
-            phone = phone.replace("\n", " ").replace("\t", " ").strip()
+            phone = await self._read_first_text(
+                page,
+                selectors=[
+                    PROFILE_PHONE_SELECTOR,
+                    ".user-profile-banner .company-name .telephone",
+                    ".company-name span.telephone",
+                    "span.telephone",
+                ],
+                default="",
+            )
+            phone = self._clean_whitespace(phone)
 
-            email = await self._read_text(page, PROFILE_EMAIL_SELECTOR, "")
-            email = email.replace("\n", " ").replace("\t", " ").strip()
+            email = await self._read_first_text(
+                page,
+                selectors=[
+                    PROFILE_EMAIL_SELECTOR,
+                    ".user-profile-banner .company-name .mail",
+                    ".company-name span.mail",
+                    "span.mail",
+                ],
+                default="",
+            )
+            email = self._clean_whitespace(email)
 
-            website = await self._read_attribute(page, PROFILE_WEBSITE_SELECTOR, "href", "")
+            website = await self._read_first_attribute(
+                page,
+                selectors=[
+                    PROFILE_WEBSITE_SELECTOR,
+                    ".user-profile-banner .company-name a.website",
+                    ".company-name a.website[href^='http']",
+                    "a.website[href^='http']",
+                    ".company-name a[href^='http']",
+                ],
+                attribute="href",
+                default="",
+            )
+            website = self._clean_whitespace(website)
+
+            page_text = ""
+            if not phone or not email or not website:
+                try:
+                    page_text = await page.locator("body").inner_text()
+                except Exception:
+                    page_text = ""
+
+            if not phone and page_text:
+                phone_match = re.search(r"\b(?:\+91[-\s]?)?[0-9]{10}\b", page_text)
+                if phone_match:
+                    phone = phone_match.group(0)
+
+            if not email and page_text:
+                email_match = re.search(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", page_text)
+                if email_match:
+                    email = email_match.group(0)
+
+            if not website and page_text:
+                website_match = re.search(r"https?://[^\s\"'<>]+", page_text)
+                if website_match:
+                    website = website_match.group(0).rstrip(".,)")
+
             description = await self._read_text(page, PROFILE_DESCRIPTION_SELECTOR, "")
             engagement_level = await self._read_text(page, PROFILE_ENGAGEMENT_SELECTOR, "")
             active_since = await self._read_text(page, PROFILE_ACTIVE_SINCE_SELECTOR, "")
@@ -224,6 +393,44 @@ class StartupIndiaScraper:
             return model.to_row()
         finally:
             await page.close()
+
+    @staticmethod
+    async def _wait_for_profile_render(page) -> None:
+        selectors = [
+            PROFILE_NAME_SELECTOR,
+            ".user-profile-banner .company-name",
+            ".company-name .telephone, .company-name .mail, .company-name a.website",
+        ]
+        for selector in selectors:
+            try:
+                await page.wait_for_selector(selector, timeout=12000)
+                break
+            except Exception:
+                continue
+
+        await asyncio.sleep(1.0)
+
+    @staticmethod
+    def _clean_whitespace(value: str) -> str:
+        return re.sub(r"\s+", " ", (value or "")).strip()
+
+    @staticmethod
+    async def _read_first_text(page, selectors: list[str], default: str) -> str:
+        for selector in selectors:
+            value = await StartupIndiaScraper._read_text(page, selector, "")
+            value = StartupIndiaScraper._clean_whitespace(value)
+            if value:
+                return value
+        return default
+
+    @staticmethod
+    async def _read_first_attribute(page, selectors: list[str], attribute: str, default: str) -> str:
+        for selector in selectors:
+            value = await StartupIndiaScraper._read_attribute(page, selector, attribute, "")
+            value = StartupIndiaScraper._clean_whitespace(value)
+            if value:
+                return value
+        return default
 
     @staticmethod
     async def _read_text(page, selector: str, default: str) -> str:
